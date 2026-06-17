@@ -17,9 +17,12 @@ const connectionError = ref(null)
 
 // 获取WebSocket URL
 function getWsUrl() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = window.location.host
-  return `${protocol}//${host}`
+  // 本地开发环境：连接本地后端 3000 端口
+  if (import.meta.env.DEV) {
+    return 'ws://localhost:3000'
+  }
+  // 生产环境：固定连接腾讯云后端，https 对应 wss 协议
+  return 'wss://wordplay-backend-271534-5-1345231962.sh.run.tcloudbase.com'
 }
 
 // 初始化WebSocket连接
