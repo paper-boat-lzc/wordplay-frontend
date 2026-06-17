@@ -19,7 +19,7 @@
 
       <!-- 主游戏区域 -->
       <div class="game-area">
-        <!-- 左侧：用户列表 -->
+        <!-- 左侧：用户列表 + 排行榜 -->
         <div class="sidebar glass-card animate-fadeIn" style="animation-delay: 0.1s">
           <h3>在线玩家 ({{ users.length }})</h3>
           <div class="user-list">
@@ -33,6 +33,33 @@
               <span class="online-dot"></span>
             </div>
           </div>
+
+          <!-- 🏆 新增：排行榜 -->
+          <div class="leaderboard-section">
+            <h3>🏆 房间排行榜</h3>
+            <div class="leaderboard-list">
+              <div 
+                v-for="player in leaderboard" 
+                :key="player.id" 
+                class="leaderboard-item"
+                :class="{ 'leaderboard-first': player.rank === 1, 'leaderboard-second': player.rank === 2, 'leaderboard-third': player.rank === 3 }"
+              >
+                <span class="leaderboard-rank">
+                  <span v-if="player.rank === 1">🥇</span>
+                  <span v-else-if="player.rank === 2">🥈</span>
+                  <span v-else-if="player.rank === 3">🥉</span>
+                  <span v-else>{{ player.rank }}</span>
+                </span>
+                <span class="leaderboard-name">{{ player.nickname }}</span>
+                <span class="leaderboard-score">
+                  🏆 {{ player.correctCount }}
+                </span>
+              </div>
+              <div v-if="leaderboard.length === 0" class="empty-leaderboard">
+                还没有人猜对
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 中间：游戏主区域 -->
@@ -44,7 +71,7 @@
               📝 当前词语：<span class="length-number">{{ wordLength }}</span> 个字
             </div>
             
-            <!-- 7. 新提示系统：关联词提示（格式：💡 提示：水果、红色） -->
+            <!-- 关联词提示 -->
             <div class="ai-hints" v-if="aiHints.length > 0">
               <div class="ai-hint-item">
                 💡 提示：{{ aiHints.join('、') }}
@@ -60,6 +87,32 @@
               >_</span>
             </div>
             <p class="hint-text">猜词次数：{{ guessCount }} 次</p>
+
+            <!-- 跳过投票按钮 -->
+            <div class="skip-vote-section">
+              <button 
+                class="btn skip-btn" 
+                :class="{ voted: hasVotedSkip, disabled: showWinner }"
+                @click="voteSkip"
+                :disabled="hasVotedSkip || showWinner"
+              >
+                {{ hasVotedSkip ? '✓ 已投票跳过' : '⏭️ 跳过本轮' }}
+              </button>
+              <div class="skip-vote-status" v-if="skipVote.total > 0">
+                <div class="skip-progress-bar">
+                  <div 
+                    class="skip-progress-fill" 
+                    :style="{ width: skipVote.percent + '%' }"
+                  ></div>
+                </div>
+                <span class="skip-vote-text">
+                  跳过投票: {{ skipVote.votes }} / {{ skipVote.total }} ({{ skipVote.percent }}%)
+                </span>
+                <span v-if="skipVote.canSkip" class="skip-soon">
+                  即将跳过...
+                </span>
+              </div>
+            </div>
           </div>
 
           <!-- 猜词输入区 -->
@@ -83,7 +136,7 @@
             </div>
           </div>
 
-          <!-- 5. 猜词结果列表（按关联度从高到低排序） -->
+          <!-- 猜词结果列表（按关联度从高到低排序） -->
           <div class="guesses-area glass-card animate-fadeIn" style="animation-delay: 0.4s">
             <h3>猜词记录（按关联度排序）</h3>
             <div class="guesses-list" ref="guessesList">
@@ -125,6 +178,16 @@
           <p class="countdown">3秒后开始下一轮...</p>
         </div>
       </div>
+
+      <!-- 跳过弹窗 -->
+      <div v-if="showSkipped" class="winner-modal animate-fadeIn">
+        <div class="winner-content glass-card">
+          <div class="winner-icon">⏭️</div>
+          <h2>本轮已跳过</h2>
+          <p class="winner-word">正确答案: <span>{{ correctWord }}</span></p>
+          <p class="countdown">3秒后开始下一轮...</p>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -140,6 +203,7 @@ const { connect, send, on, disconnect } = useWebSocket()
 
 const roomId = ref(route.params.roomId)
 const nickname = ref(localStorage.getItem('nickname') || '匿名玩家')
+const userId = ref(localStorage.getItem('userId'))
 const users = ref([])
 const round = ref(1)
 const wordLength = ref(0)
@@ -147,26 +211,28 @@ const category = ref('')
 const guessText = ref('')
 const guesses = ref([])
 const showWinner = ref(false)
+const showSkipped = ref(false)
 const winner = ref(null)
 const correctWord = ref('')
 const copied = ref(false)
 const guessesList = ref(null)
 const guessCount = ref(0)
 const aiHints = ref([])
+const skipVote = ref({ votes: 0, total: 0, percent: 0, canSkip: false })
+const hasVotedSkip = ref(false)
 
-// 5. 猜词历史按关联度从高到低排序（100分永远在最上面）
+// 🏆 新增：排行榜数据
+const leaderboard = ref([])
+
 const sortedGuesses = computed(() => {
   return [...guesses.value].sort((a, b) => {
-    // 先按分数降序
     if (b.similarity.score !== a.similarity.score) {
       return b.similarity.score - a.similarity.score
     }
-    // 分数相同按时间升序（先猜的在前）
     return a.timestamp - b.timestamp
   })
 })
 
-// 分类名称映射
 const categoryNames = {
   animals: '🐾 动物',
   food: '🍔 食物',
@@ -187,18 +253,26 @@ const categoryNames = {
 
 const categoryName = ref('')
 
-// 计算分类显示名称
 watch(category, (newVal) => {
   categoryName.value = categoryNames[newVal] || newVal
 })
 
-// 连接WebSocket
+function voteSkip() {
+  if (hasVotedSkip.value || showWinner.value) return
+  
+  send('VOTE_SKIP', {
+    roomId: roomId.value
+  })
+  
+  hasVotedSkip.value = true
+}
+
 onMounted(async () => {
   await connect()
   
-  // 自动加入房间（带上token和userId支持重连）
   const savedToken = localStorage.getItem('userToken')
   const savedUserId = localStorage.getItem('userId')
+  userId.value = savedUserId
   
   send('JOIN_ROOM', {
     roomId: roomId.value,
@@ -207,7 +281,6 @@ onMounted(async () => {
     userId: savedUserId
   })
 
-  // 4. 监听房间信息（使用gameState完整状态）
   on('ROOM_JOINED', (data) => {
     const state = data.gameState || data.roomInfo
     users.value = state.users
@@ -217,44 +290,51 @@ onMounted(async () => {
     guesses.value = state.guesses || []
     guessCount.value = state.guessCount || 0
     aiHints.value = state.aiHints || []
+    skipVote.value = state.skipVote || { votes: 0, total: 0, percent: 0, canSkip: false }
+    leaderboard.value = state.leaderboard || [] // 🏆 初始化排行榜
   })
 
-  // 监听用户加入
   on('USER_JOINED', (data) => {
     const state = data.gameState || data.roomInfo
     users.value = state.users
+    skipVote.value = state.skipVote || skipVote.value
+    leaderboard.value = state.leaderboard || leaderboard.value
   })
 
-  // 监听用户离开
   on('USER_LEFT', (data) => {
     const state = data.gameState || data.roomInfo
     users.value = state.users
+    skipVote.value = state.skipVote || skipVote.value
+    leaderboard.value = state.leaderboard || leaderboard.value
   })
 
-  // 监听用户离线
   on('USER_OFFLINE', (data) => {
     const state = data.gameState || data.roomInfo
     users.value = state.users
+    skipVote.value = state.skipVote || skipVote.value
+    leaderboard.value = state.leaderboard || leaderboard.value
   })
 
-  // 监听新一轮
   on('NEW_ROUND', (data) => {
     round.value = data.round
     wordLength.value = data.wordLength
     category.value = data.category
     guesses.value = []
     showWinner.value = false
+    showSkipped.value = false
     winner.value = null
     correctWord.value = ''
     guessCount.value = 0
     aiHints.value = []
+    skipVote.value = data.skipVote || { votes: 0, total: 0, percent: 0, canSkip: false }
+    hasVotedSkip.value = false
   })
 
-  // 监听新猜词
   on('NEW_GUESS', (data) => {
     guesses.value = data.allGuesses
     guessCount.value = data.guessCount
     aiHints.value = data.aiHints || []
+    skipVote.value = data.skipVote || skipVote.value
     nextTick(() => {
       if (guessesList.value) {
         guessesList.value.scrollTop = guessesList.value.scrollHeight
@@ -262,14 +342,26 @@ onMounted(async () => {
     })
   })
 
-  // 监听有人获胜
+  on('SKIP_VOTE_UPDATE', (data) => {
+    skipVote.value = data
+  })
+
+  on('ROUND_SKIPPED', (data) => {
+    showSkipped.value = true
+    correctWord.value = data.correctWord
+  })
+
+  // 🏆 新增：监听排行榜更新
+  on('LEADERBOARD_UPDATE', (data) => {
+    leaderboard.value = data.leaderboard
+  })
+
   on('ROUND_WON', (data) => {
     showWinner.value = true
     winner.value = data.winner
     correctWord.value = data.correctWord
   })
 
-  // 监听错误
   on('ERROR', (data) => {
     alert(data.message)
     if (data.message.includes('房间不存在')) {
@@ -278,21 +370,18 @@ onMounted(async () => {
   })
 })
 
-// 返回首页
 function goBack() {
   send('LEAVE_ROOM', { roomId: roomId.value })
   disconnect()
   router.push('/')
 }
 
-// 复制房间号
 function copyRoomId() {
   navigator.clipboard.writeText(roomId.value)
   copied.value = true
   setTimeout(() => copied.value = false, 2000)
 }
 
-// 提交猜词
 function submitGuess() {
   if (!guessText.value.trim() || showWinner.value) return
   
@@ -304,7 +393,6 @@ function submitGuess() {
   guessText.value = ''
 }
 
-// 获取相似度样式类
 function getSimilarityClass(score) {
   if (score >= 80) return 'high'
   if (score >= 50) return 'medium'
@@ -399,6 +487,7 @@ function getSimilarityClass(score) {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  margin-bottom: 24px;
 }
 
 .user-item {
@@ -433,6 +522,72 @@ function getSimilarityClass(score) {
   border-radius: 50%;
   background: var(--success);
   animation: pulse 2s infinite;
+}
+
+/* 🏆 新增：排行榜样式 */
+.leaderboard-section {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+
+.leaderboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.leaderboard-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border-radius: 10px;
+  transition: all 0.3s;
+}
+
+.leaderboard-item.leaderboard-first {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.15), rgba(245, 158, 11, 0.1));
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.leaderboard-item.leaderboard-second {
+  background: linear-gradient(135deg, rgba(156, 163, 175, 0.15), rgba(107, 114, 128, 0.1));
+  border: 1px solid rgba(156, 163, 175, 0.3);
+}
+
+.leaderboard-item.leaderboard-third {
+  background: linear-gradient(135deg, rgba(217, 119, 6, 0.15), rgba(180, 83, 9, 0.1));
+  border: 1px solid rgba(217, 119, 6, 0.3);
+}
+
+.leaderboard-rank {
+  width: 28px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.leaderboard-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-score {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary-light);
+}
+
+.empty-leaderboard {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .main-area {
@@ -506,6 +661,76 @@ function getSimilarityClass(score) {
 .hint-text {
   color: var(--text-secondary);
   font-size: 14px;
+  margin-bottom: 20px;
+}
+
+.skip-vote-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.skip-btn {
+  padding: 10px 24px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+  margin-bottom: 12px;
+}
+
+.skip-btn:hover:not(.voted):not(.disabled) {
+  border-color: var(--primary);
+  background: rgba(167, 139, 250, 0.1);
+}
+
+.skip-btn.voted {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: #34d399;
+  color: #34d399;
+  cursor: default;
+}
+
+.skip-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.skip-vote-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.skip-progress-bar {
+  width: 200px;
+  height: 8px;
+  background: var(--bg-dark);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.skip-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.skip-vote-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.skip-soon {
+  font-size: 13px;
+  color: #fbbf24;
+  font-weight: 600;
+  animation: pulse 1s infinite;
 }
 
 .input-area {
